@@ -1,0 +1,77 @@
+version: '3.9'
+
+# ══════════════════════════════════════════════════════════════
+#  黑優浦蜜 v2 完整生產環境
+#  啟動：docker compose up -d
+#  停止：docker compose down
+#  查看日誌：docker compose logs -f bot
+# ══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── 主程式 ──────────────────────────────────────────────────
+  bot:
+    build: .
+    container_name: helpmee_bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_BACKEND:   postgres
+      DATABASE_URL: postgresql://helpmee:${POSTGRES_PASSWORD:-helpmee_pass}@postgres:5432/helpmee
+      REDIS_URL:    redis://redis:6379
+      SQLITE_PATH:  /app/data/helpmee.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - bot_data:/app/data
+    networks:
+      - helpmee_net
+
+  # ── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: helpmee_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       helpmee
+      POSTGRES_USER:     helpmee
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-helpmee_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U helpmee"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - helpmee_net
+
+  # ── Redis ────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: helpmee_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - helpmee_net
+
+
+volumes:
+  postgres_data:
+  redis_data:
+  bot_data:
+
+
+networks:
+  helpmee_net:
+    driver: bridge

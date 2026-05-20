@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    container_name: helpmee_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_BACKEND: sqlite
+      SQLITE_PATH: /app/data/helpmee.db
+      REDIS_URL: ""
+      FFMPEG_PATH: ffmpeg
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs

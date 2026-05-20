@@ -1,0 +1,29 @@
+# ── Discord ────────────────────────────────────────────────
+discord.py[voice]>=2.3.2
+PyNaCl>=1.5.0
+
+# ── 音樂 ───────────────────────────────────────────────────
+yt-dlp>=2024.1.0
+spotipy>=2.24.0          # optional，沒 KEY 不會啟用
+
+# ── 翻譯 ───────────────────────────────────────────────────
+deep-translator>=1.11.4
+
+# ── Optional Utility AI（用其中一個就夠了，預設 OpenAI）──
+openai>=1.30.0
+google-generativeai>=0.8.0
+
+# ── 網路 ───────────────────────────────────────────────────
+httpx>=0.25.0
+certifi>=2024.2.2        # 提供最新 CA bundle
+truststore>=0.9.0        # 使用系統信任憑證（解 SSL CERTIFICATE_VERIFY_FAILED）
+opencc-python-reimplemented>=0.1.7   # 簡轉繁（給天氣 geocoding 用）
+
+# ── 資料庫 ─────────────────────────────────────────────────
+aiosqlite>=0.20.0
+asyncpg>=0.29.0
+redis>=5.0.3
+
+# ── 工具 ───────────────────────────────────────────────────
+python-dotenv>=1.0.0
+sympy>=1.12              # 工程計算機（symbolic math），沒裝會 fallback 輕量版

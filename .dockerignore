@@ -1,0 +1,30 @@
+# secrets
+.env
+.env.*
+
+# git
+.git
+.gitignore
+
+# python
+.venv
+venv
+env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# database / runtime
+*.db
+*.sqlite
+*.sqlite3
+data
+logs
+*.log
+
+# editor / system
+.vscode
+.idea
+.DS_Store
+Thumbs.db
