@@ -19,4 +19,4 @@ services:
     volumes:
       - ./data:/app/data       # SQLite 資料持久化
       - ./logs:/app/logs       # 日誌
-      - ./secrets:/app/secrets:ro   # 選填：放 youtube_cookies.txt（搭配 .env 的 YTDLP_COOKIES_FILE）
+      - ./secrets:/app/secrets:rw   # 選填：放 youtube_cookies.txt（搭配 .env 的 YTDLP_COOKIES_FILE）

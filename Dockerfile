@@ -11,9 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# yt-dlp[default] 會帶入解析 YouTube 簽名 / challenge 需要的相依套件
-RUN pip install --no-cache-dir --user -r requirements.txt \
-    && pip install --no-cache-dir --user "yt-dlp[default]"
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt \
+    && pip install --no-cache-dir --prefix=/install "yt-dlp[default]"
 
 
 # ── 正式階段 ────────────────────────────────────────────────────
@@ -42,8 +41,8 @@ RUN curl -fsSL https://deno.land/install.sh | sh \
     && deno --version
 
 # 複製 Python 套件
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+COPY --from=builder /install /usr/local
+ENV PATH=/usr/local/bin:$PATH
 
 # 複製原始碼
 COPY . .
