@@ -36,13 +36,30 @@ from config import Config
 # ════════════════════════════════════════════════════════════════
 #  yt-dlp 設定
 # ════════════════════════════════════════════════════════════════
-_YDL_SEARCH_OPTS = {
-    'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True,
-    'extract_flat': True, 'source_address': '0.0.0.0',
+_YOUTUBE_EXTRACTOR_ARGS = {
+    'youtube': {
+        # 多 client fallback：降低 YouTube 對單一 client 擋音源的機率
+        'player_client': ['android_vr', 'android', 'ios', 'web'],
+    }
 }
+
+_YDL_SEARCH_OPTS = {
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'no_warnings': False,
+    'extract_flat': True,
+    'noplaylist': True,
+    'source_address': '0.0.0.0',
+    'extractor_args': _YOUTUBE_EXTRACTOR_ARGS,
+}
+
 _YDL_STREAM_OPTS = {
-    'format': 'bestaudio/best', 'quiet': True, 'no_warnings': True,
-    'noplaylist': True, 'source_address': '0.0.0.0',
+    'format': 'bestaudio/best',
+    'quiet': True,
+    'no_warnings': False,
+    'noplaylist': True,
+    'source_address': '0.0.0.0',
+    'extractor_args': _YOUTUBE_EXTRACTOR_ARGS,
 }
 _FFMPEG_OPTS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
@@ -609,11 +626,10 @@ class MusicEngine:
         }):
             return False, "這個結果是頻道或播放清單，不是單一影片"
 
-        # 最終驗證：實際試取串流 URL
-        stream_url = await self.get_stream_url(webpage_url)
-        if not stream_url:
-            return False, "yt-dlp 無法取得音源（可能是年齡限制、付費內容或 YouTube 擋了）"
-
+        # 搜尋選歌階段不要預抓串流 URL。
+        # 原本這裡會先呼叫 yt-dlp 驗證一次，但 YouTube 對 VPS / 機房 IP 常出現 bot check，
+        # 會導致「其實正式播放可能成功，但預驗證先失敗」。
+        # 因此這裡只做基本 URL / 單一影片檢查，真正串流交給播放階段處理。
         return True, ""
 
     # ════════════════════════════════════════════════════════

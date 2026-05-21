@@ -960,13 +960,66 @@ class MainCog(commands.Cog):
 
         # 取串流 URL
         stream_url = await self.music.get_stream_url(next_song.webpage_url)
+
+        # 若原影片被 YouTube bot check / age / region 擋住，嘗試用歌名找替代版本
+        if not stream_url:
+            print(f"[Music] _start_next: 原始影片無法取得串流 URL，嘗試 fallback：{next_song.title}")
+
+            fallback_queries = [
+                f"{next_song.title} official audio",
+                f"{next_song.title} lyrics",
+                f"{next_song.title} topic",
+                f"{next_song.title} audio",
+            ]
+
+            tried_urls = {next_song.webpage_url, next_song.url}
+            fallback_found = False
+
+            for fq in fallback_queries:
+                try:
+                    print(f"[Music] fallback 搜尋：{fq}")
+                    candidates = await self.music.search_youtube(fq, max_results=5, scored=False)
+                except Exception as e:
+                    print(f"[Music] fallback 搜尋失敗：{fq} / {e}")
+                    continue
+
+                for item in candidates:
+                    cand_url = item.get("webpage_url") or item.get("url") or ""
+                    if not cand_url or cand_url in tried_urls:
+                        continue
+                    tried_urls.add(cand_url)
+
+                    cand_title = item.get("title") or next_song.title
+                    print(f"[Music] fallback 嘗試：{cand_title} / {cand_url}")
+
+                    cand_stream = await self.music.get_stream_url(cand_url)
+                    if not cand_stream:
+                        continue
+
+                    # 找到可播版本：改用候選版本播放，但保留點歌人資訊
+                    stream_url = cand_stream
+                    next_song.title = cand_title
+                    next_song.url = cand_url
+                    next_song.webpage_url = cand_url
+                    next_song.duration = item.get("duration") or next_song.duration
+                    next_song.uploader = item.get("uploader") or next_song.uploader
+                    next_song.thumbnail = item.get("thumbnail") or next_song.thumbnail
+                    next_song.display_source = item.get("display_source") or next_song.display_source
+
+                    print(f"[Music] fallback 成功，改播：{next_song.title}")
+                    fallback_found = True
+                    break
+
+                if fallback_found:
+                    break
+
         if not stream_url:
             print(f"[Music] _start_next: 無法取得串流 URL：{next_song.title}")
             if channel:
                 try:
                     await channel.send(embed=make_embed(
                         "⏭️ 跳過一首",
-                        f"「{next_song.title}」無法取得音源，跳過喵～",
+                        f"「{next_song.title}」無法取得音源，已嘗試替代版本但仍失敗，跳過喵～",
                         COLOR_ERROR,
                     ))
                 except Exception:
