@@ -1,3 +1,17 @@
+# 黑優浦蜜 Discord Bot v2.3.1
+
+## 🆕 v2.3.1 重點（雲端 / VPS 音樂穩定化）
+- **同曲保護「寧可不播，也不要播錯」**：被 YouTube 擋住時會找**同一首歌**的其他版本（official audio / lyrics），每個候選都要通過 same-song 評分；像「遇見」不會被換成「遇到」（短中/日/韓文歌名硬規則）
+- **移除選歌階段預抓 stream**：選歌只做輕量結構檢查，不再提早觸發 YouTube bot check（疑難雜症問題 A）
+- **`_start_next` 改迴圈式 + `resolve_playable_stream`**：單一候選失敗不會炸掉整個播放，會跳過並嘗試下一首；fallback 換版本會通知使用者
+- **YouTube 錯誤分類**（`classify_ytdlp_error`）：bot check / 不可用 / 私人 / 地區限制 / 無格式 → 對應友善提示
+- **yt-dlp 雲端設定**：`player_client = android_vr → web → android → ios`、`retries`，並支援選填 `YTDLP_COOKIES_FILE`（不硬編碼、不進 git）
+- **Dockerfile 補強**：Deno（JS runtime）+ `yt-dlp[default]` + curl/unzip/ca-certificates，提升機房 IP 解析率
+- **雙 AI Provider**：Gemini 主、OpenAI 副，失敗 / timeout / 空白輸出自動 fallback（`AI_PRIMARY_PROVIDER` / `AI_SECONDARY_PROVIDER` / `AI_FALLBACK_ENABLED`）
+- **文案**：吃喝點「不需要」改為「哼！那牢大自己想辦法吧~本喵也幫不了你」（無 emoji）；音樂指令與 /幫助 音符符號補齊一致
+
+> ⚠️ 提醒：Deno 解決的是「No supported JavaScript runtime」這類**簽名/challenge**問題，**無法**解決 YouTube 的登入驗證（bot check）。bot check 最有效的解法是 `YTDLP_COOKIES_FILE` + 同曲 fallback。
+
 # 黑優浦蜜 Discord Bot v2.3.0
 
 ## 🆕 v2.3.0 重點

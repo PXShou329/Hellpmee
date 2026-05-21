@@ -28,6 +28,13 @@ class Config:
     UTILITY_AI_ENABLED: bool = _bool('UTILITY_AI_ENABLED', 'false')
     UTILITY_AI_BACKEND: str  = os.getenv('UTILITY_AI_BACKEND', 'openai').lower()
 
+    # ── 雙 AI Provider（Gemini 主 / OpenAI 副，可自動 fallback）──
+    #    UTILITY_AI_BACKEND 仍相容舊設定；新版以下列為主：
+    AI_PRIMARY_PROVIDER:   str  = os.getenv('AI_PRIMARY_PROVIDER',   'gemini').lower()
+    AI_SECONDARY_PROVIDER: str  = os.getenv('AI_SECONDARY_PROVIDER', 'openai').lower()
+    AI_FALLBACK_ENABLED:   bool = _bool('AI_FALLBACK_ENABLED', 'true')
+    AI_TIMEOUT_SECONDS:    int  = int(os.getenv('AI_TIMEOUT_SECONDS', '25'))
+
     OPENAI_API_KEY: str = os.getenv('OPENAI_API_KEY', '')
     OPENAI_MODEL:   str = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 
@@ -86,3 +93,8 @@ class Config:
     FFMPEG_PATH:        str = os.getenv('FFMPEG_PATH', 'ffmpeg')
     MUSIC_QUEUE_MAX:    int = int(os.getenv('MUSIC_QUEUE_MAX', '100'))   # 佇列上限
     SPOTIFY_PLAYLIST_MAX: int = int(os.getenv('SPOTIFY_PLAYLIST_MAX', '25'))
+
+    # ── 選填：yt-dlp cookies（解 YouTube「Sign in to confirm you're not a bot」）──
+    #    指到一個 cookies.txt 路徑才會用；不存在就忽略，程式照常運作。
+    #    ⚠️ 千萬不要把 cookies 檔提交到 git（.gitignore 已擋）
+    YTDLP_COOKIES_FILE: str = os.getenv('YTDLP_COOKIES_FILE', '')

@@ -1,3 +1,9 @@
+# ══════════════════════════════════════════════════════════════
+#  黑優浦蜜 v2 — VPS 正式環境（SQLite 單容器，最省資源）
+#  啟動：docker compose -f docker-compose.prod.yml up -d --build
+#  日誌：docker compose -f docker-compose.prod.yml logs -f bot
+#  停止：docker compose -f docker-compose.prod.yml down
+# ══════════════════════════════════════════════════════════════
 services:
   bot:
     build: .
@@ -6,10 +12,11 @@ services:
     env_file:
       - .env
     environment:
-      DB_BACKEND: sqlite
+      DB_BACKEND:  sqlite
       SQLITE_PATH: /app/data/helpmee.db
-      REDIS_URL: ""
+      REDIS_URL:   ""          # 留空 → 自動用記憶體模式
       FFMPEG_PATH: ffmpeg
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ./data:/app/data       # SQLite 資料持久化
+      - ./logs:/app/logs       # 日誌
+      - ./secrets:/app/secrets:ro   # 選填：放 youtube_cookies.txt（搭配 .env 的 YTDLP_COOKIES_FILE）

@@ -53,38 +53,67 @@ class UtilityAI:
     def __init__(self, cache: RedisCache):
         self.cache = cache
         self.enabled = Config.UTILITY_AI_ENABLED
-        self.backend = Config.UTILITY_AI_BACKEND   # 'openai' / 'gemini'
+
+        # ⭐ 雙 provider：Gemini 主 / OpenAI 副（可 fallback）
+        self.primary          = Config.AI_PRIMARY_PROVIDER     # 預設 gemini
+        self.secondary        = Config.AI_SECONDARY_PROVIDER   # 預設 openai
+        self.fallback_enabled = Config.AI_FALLBACK_ENABLED
+        self.timeout          = Config.AI_TIMEOUT_SECONDS
+        # 相容舊欄位（部分舊程式可能讀 self.backend）
+        self.backend = self.primary
 
         self._openai = None
         self._gemini = None
 
         if self.enabled:
-            self._init_backend()
+            self._init_all_backends()
             if not self._has_any_backend():
-                print("⚠️  UTILITY_AI_ENABLED=true 但沒有可用 backend，自動 disable")
+                print("⚠️  UTILITY_AI_ENABLED=true 但沒有任何可用 backend，自動 disable")
                 self.enabled = False
 
         if self.enabled:
-            print(f"✅ Utility AI 已啟用（backend: {self.backend}）")
+            # 啟動 log：只說有沒有 key，不印出 key 內容
+            print(f"✅ Gemini API Key {'已讀取' if Config.GEMINI_API_KEY else '未設定'}")
+            print(f"✅ OpenAI API Key {'已讀取' if Config.OPENAI_API_KEY else '未設定'}")
+            order = self._provider_order()
+            print(f"✅ AI Provider：primary={self.primary}, secondary={self.secondary}, "
+                  f"fallback={'on' if self.fallback_enabled else 'off'}"
+                  f"（實際可用：{' → '.join(order) if order else '無'}）")
+            if self.fallback_enabled and len(order) < 2:
+                print("⚠️  目前只有一個 AI backend 可用，fallback 實質停用")
         else:
             print("ℹ️  Utility AI 未啟用，所有功能會用本地 fallback")
 
-    def _init_backend(self):
+    def _init_all_backends(self):
+        """兩個 backend 只要有 key 就都初始化，實際呼叫時再決定先用誰。"""
         # OpenAI
-        if (self.backend == 'openai' and _OPENAI_AVAILABLE
-                and Config.OPENAI_API_KEY):
+        if _OPENAI_AVAILABLE and Config.OPENAI_API_KEY:
             try:
                 self._openai = AsyncOpenAI(api_key=Config.OPENAI_API_KEY)
             except Exception as e:
                 print(f"⚠️  OpenAI 初始化失敗：{e}")
         # Gemini
-        if (self.backend == 'gemini' and _GEMINI_AVAILABLE
-                and Config.GEMINI_API_KEY):
+        if _GEMINI_AVAILABLE and Config.GEMINI_API_KEY:
             try:
                 genai.configure(api_key=Config.GEMINI_API_KEY)
                 self._gemini = genai.GenerativeModel(Config.GEMINI_MODEL)
             except Exception as e:
                 print(f"⚠️  Gemini 初始化失敗：{e}")
+
+    def _client_for(self, provider: str):
+        if provider == 'openai':
+            return self._openai
+        if provider == 'gemini':
+            return self._gemini
+        return None
+
+    def _provider_order(self) -> list:
+        """回傳實際可用的 provider 順序（primary 在前，去掉沒初始化成功的）。"""
+        order = []
+        for p in (self.primary, self.secondary):
+            if p and p not in order and self._client_for(p) is not None:
+                order.append(p)
+        return order
 
     def _has_any_backend(self) -> bool:
         return self._openai is not None or self._gemini is not None
@@ -336,14 +365,38 @@ class UtilityAI:
     # ════════════════════════════════════════════════════════
     async def _generate_safe(self, prompt: str,
                               max_tokens: int = 100) -> Optional[str]:
-        """呼叫實際 backend，任何錯誤都靜默吞掉回 None"""
-        try:
-            if self.backend == 'openai' and self._openai:
-                return await self._call_openai(prompt, max_tokens)
-            if self.backend == 'gemini' and self._gemini:
-                return await self._call_gemini(prompt, max_tokens)
-        except Exception as e:
-            print(f"[UtilityAI] 呼叫失敗（已靜默 fallback）：{e}")
+        """
+        依 primary → secondary 順序呼叫 AI。
+        primary 失敗 / timeout / 空白輸出 → （若開啟 fallback）改用 secondary。
+        任何情況最終失敗都回 None（呼叫端用本地 fallback），不會 raise。
+        """
+        order = self._provider_order()
+        if not self.fallback_enabled:
+            order = order[:1]
+
+        last_err = None
+        for prov in order:
+            client = self._client_for(prov)
+            if client is None:
+                continue
+            try:
+                if prov == 'openai':
+                    coro = self._call_openai(prompt, max_tokens)
+                else:
+                    coro = self._call_gemini(prompt, max_tokens)
+                out = await asyncio.wait_for(coro, timeout=self.timeout)
+                if out and out.strip():
+                    return out
+                print(f"[UtilityAI] {prov} 回傳空白，換下一個 provider")
+            except asyncio.TimeoutError:
+                last_err = f"{prov} timeout({self.timeout}s)"
+                print(f"[UtilityAI] {last_err}，換下一個 provider")
+            except Exception as e:
+                last_err = f"{prov}: {type(e).__name__}"
+                print(f"[UtilityAI] {prov} 失敗（{type(e).__name__}），換下一個 provider：{str(e)[:120]}")
+
+        if last_err:
+            print(f"[UtilityAI] 所有 provider 都失敗（最後：{last_err}），靜默 fallback 本地")
         return None
 
     async def _call_openai(self, prompt: str, max_tokens: int) -> Optional[str]:

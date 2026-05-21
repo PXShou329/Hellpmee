@@ -351,7 +351,7 @@ class LocationChoiceView(ExpiringViewMixin, discord.ui.View):
             if isinstance(item, discord.ui.Button) and item.style != discord.ButtonStyle.link:
                 item.disabled = True
         await interaction.response.edit_message(
-            content="好喔，那你自己想辦法吧，本喵也幫不了你 😼",
+            content="哼！那牢大自己想辦法吧~本喵也幫不了你",
             embed=None,
             view=self,
         )
@@ -946,132 +946,115 @@ class MainCog(commands.Cog):
             print(f"[Music] _start_next: 已在播放中（current={q.current.title if q.current else None}），跳過")
             return
 
-        # 從佇列拿下一首
-        next_song = q.pop_next()
-        if not next_song:
-            print(f"[Music] _start_next: 佇列空了，停止播放")
-            q.current = None
-            # ⭐ v2.2.0：佇列自然清空 → 輸出本回合歌單
-            await self._send_session_playlist(guild_id, channel)
-            return
+        # ⭐ 迴圈式：連續嘗試直到有一首能播，或佇列清空（疑難雜症 7.10）
+        while True:
+            next_song = q.pop_next()
+            if not next_song:
+                print(f"[Music] _start_next: 佇列空了，停止播放")
+                q.current = None
+                # ⭐ v2.2.0：佇列自然清空 → 輸出本回合歌單
+                await self._send_session_playlist(guild_id, channel)
+                return
 
-        self._state_log(guild_id, "_start_next:pop_next",
-                         song_title=next_song.title, song_url=next_song.webpage_url)
+            self._state_log(guild_id, "_start_next:pop_next",
+                             song_title=next_song.title, song_url=next_song.webpage_url)
 
-        # 取串流 URL
-        stream_url = await self.music.get_stream_url(next_song.webpage_url)
+            # ⭐ 解析可播放串流：原版 → 同曲 fallback（被擋也不會亂播別首歌）
+            result = await self.music.resolve_playable_stream(next_song)
 
-        # 若原影片被 YouTube bot check / age / region 擋住，嘗試用歌名找替代版本
-        if not stream_url:
-            print(f"[Music] _start_next: 原始影片無法取得串流 URL，嘗試 fallback：{next_song.title}")
+            if not result.get('ok'):
+                cat = result.get('failure_category') or 'unknown'
+                print(f"[Music] _start_next:「{next_song.title}」解析失敗 cat={cat} attempts={result.get('attempts')}")
+                if channel:
+                    try:
+                        await channel.send(embed=make_embed(
+                            "⏭️ 跳過一首",
+                            self._music_fail_message(next_song.title, cat),
+                            COLOR_ERROR,
+                        ))
+                    except Exception:
+                        pass
+                continue  # 試下一首
 
-            fallback_queries = [
-                f"{next_song.title} official audio",
-                f"{next_song.title} lyrics",
-                f"{next_song.title} topic",
-                f"{next_song.title} audio",
-            ]
+            stream_url = result['stream_url']
 
-            tried_urls = {next_song.webpage_url, next_song.url}
-            fallback_found = False
+            # ⭐ fallback 換了版本 → 更新追蹤欄位 + 通知使用者（疑難雜症 P1.7）
+            if result.get('fallback_used'):
+                next_song.fallback_used = True
+                next_song.fallback_reason = result.get('fallback_reason') or ''
+                next_song.actual_played_title = result.get('actual_title') or next_song.title
+                next_song.actual_played_url = result.get('actual_url') or next_song.webpage_url
+                if channel:
+                    try:
+                        await channel.send(embed=make_embed(
+                            "🔁 改播可用版本",
+                            f"原本那個版本被 YouTube 擋住了，黑優浦蜜幫牢大找到同一首歌的可播放版本：\n"
+                            f"**{result.get('actual_title')}**",
+                            COLOR_MUSIC,
+                        ))
+                    except Exception:
+                        pass
 
-            for fq in fallback_queries:
-                try:
-                    print(f"[Music] fallback 搜尋：{fq}")
-                    candidates = await self.music.search_youtube(fq, max_results=5, scored=False)
-                except Exception as e:
-                    print(f"[Music] fallback 搜尋失敗：{fq} / {e}")
-                    continue
-
-                for item in candidates:
-                    cand_url = item.get("webpage_url") or item.get("url") or ""
-                    if not cand_url or cand_url in tried_urls:
-                        continue
-                    tried_urls.add(cand_url)
-
-                    cand_title = item.get("title") or next_song.title
-                    print(f"[Music] fallback 嘗試：{cand_title} / {cand_url}")
-
-                    cand_stream = await self.music.get_stream_url(cand_url)
-                    if not cand_stream:
-                        continue
-
-                    # 找到可播版本：改用候選版本播放，但保留點歌人資訊
-                    stream_url = cand_stream
-                    next_song.title = cand_title
-                    next_song.url = cand_url
-                    next_song.webpage_url = cand_url
-                    next_song.duration = item.get("duration") or next_song.duration
-                    next_song.uploader = item.get("uploader") or next_song.uploader
-                    next_song.thumbnail = item.get("thumbnail") or next_song.thumbnail
-                    next_song.display_source = item.get("display_source") or next_song.display_source
-
-                    print(f"[Music] fallback 成功，改播：{next_song.title}")
-                    fallback_found = True
-                    break
-
-                if fallback_found:
-                    break
-
-        if not stream_url:
-            print(f"[Music] _start_next: 無法取得串流 URL：{next_song.title}")
-            if channel:
-                try:
-                    await channel.send(embed=make_embed(
-                        "⏭️ 跳過一首",
-                        f"「{next_song.title}」無法取得音源，已嘗試替代版本但仍失敗，跳過喵～",
-                        COLOR_ERROR,
-                    ))
-                except Exception:
-                    pass
-            # 試下一首
-            await self._start_next(guild_id, channel)
-            return
-
-        # 建立音訊來源
-        try:
-            source = self.music.get_discord_audio_source(stream_url)
-        except Exception as e:
-            print(f"[Music] _start_next: 建立音訊來源失敗：{e}")
-            traceback.print_exc()
-            if channel:
-                try:
-                    await channel.send(embed=make_embed(
-                        "出錯了喵...",
-                        f"建立音訊來源失敗，跳過這首。\n錯誤：{str(e)[:60]}",
-                        COLOR_ERROR,
-                    ))
-                except Exception:
-                    pass
-            await self._start_next(guild_id, channel)
-            return
-
-        q.current = next_song
-
-        # after callback
-        def _on_finish(error):
-            if error:
-                print(f"[Music] _on_finish: 播放結束（錯誤）：{error}")
-            else:
-                print(f"[Music] _on_finish: 播放結束（正常）：{next_song.title}")
-            coro = self._handle_song_finished(guild_id, channel)
+            # 建立音訊來源
             try:
-                asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+                source = self.music.get_discord_audio_source(stream_url)
             except Exception as e:
-                print(f"[Music] _on_finish run_coroutine 失敗：{e}")
+                print(f"[Music] _start_next: 建立音訊來源失敗：{e}")
+                traceback.print_exc()
+                if channel:
+                    try:
+                        await channel.send(embed=make_embed(
+                            "出錯了喵...",
+                            f"「{next_song.title}」建立音訊來源失敗，跳過這首。",
+                            COLOR_ERROR,
+                        ))
+                    except Exception:
+                        pass
+                continue
 
-        try:
-            q.vc.play(source, after=_on_finish)
-            self._state_log(guild_id, "ffmpeg_started",
-                             song_title=next_song.title)
-            print(f"[Music] ✅ 開始播放：{next_song.title}")
-            # ⭐ v2.2.0：成功開始播放才記錄本回合歷史
-            q.record_played(next_song)
-        except Exception as e:
-            print(f"[Music] q.vc.play() 失敗：{e}")
-            traceback.print_exc()
-            q.current = None
-            await self._start_next(guild_id, channel)
+            q.current = next_song
+
+            # after callback（用預設參數綁定 title，避免迴圈 late-binding）
+            def _on_finish(error, _title=next_song.title):
+                if error:
+                    print(f"[Music] _on_finish: 播放結束（錯誤）：{error}")
+                else:
+                    print(f"[Music] _on_finish: 播放結束（正常）：{_title}")
+                coro = self._handle_song_finished(guild_id, channel)
+                try:
+                    asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+                except Exception as e:
+                    print(f"[Music] _on_finish run_coroutine 失敗：{e}")
+
+            try:
+                q.vc.play(source, after=_on_finish)
+                self._state_log(guild_id, "ffmpeg_started",
+                                 song_title=next_song.title)
+                print(f"[Music] ✅ 開始播放：{result.get('actual_title') or next_song.title}")
+                # ⭐ v2.2.0：成功開始播放才記錄本回合歷史
+                q.record_played(next_song)
+                return
+            except Exception as e:
+                print(f"[Music] q.vc.play() 失敗：{e}")
+                traceback.print_exc()
+                q.current = None
+                continue
+
+    # ════════════════════════════════════════════════════════
+    #  🎵 音樂失敗訊息（依 YouTube 錯誤分類給友善提示，疑難雜症 7.9）
+    # ════════════════════════════════════════════════════════
+    @staticmethod
+    def _music_fail_message(title: str, category: str) -> str:
+        if category == 'youtube_bot_check':
+            return (f"「{title}」這個版本被 YouTube 要求驗證擋住了，"
+                    f"黑優浦蜜也找不到同一首歌的可播放版本，先跳過喵～\n"
+                    f"牢大可以補上歌手名稱、或直接貼 YouTube 連結再試一次。")
+        if category in ('video_unavailable', 'private_video', 'geo_blocked'):
+            return f"「{title}」這個影片無法播放（不可用 / 私人 / 地區限制），跳過喵～"
+        if category in ('no_candidate', 'no_playable_format', 'extract_failed'):
+            return (f"黑優浦蜜找不到夠吻合「{title}」又能播放的版本，"
+                    f"為了避免播錯，先跳過。牢大可以換關鍵字或貼 YouTube 連結。")
+        return f"「{title}」無法取得音源，跳過喵～"
 
     # ════════════════════════════════════════════════════════
     #  🎵 本回合歌單輸出（v2.2.0 規格六）
@@ -1190,6 +1173,7 @@ class MainCog(commands.Cog):
                     COLOR_ERROR,
                 ))
                 return
+            info['requested_query'] = 關鍵字
             await self._add_and_play(
                 guild=interaction.guild, channel=interaction.channel,
                 song_dict=info, requester=interaction.user,
@@ -1245,6 +1229,8 @@ class MainCog(commands.Cog):
                     COLOR_ERROR,
                 ))
                 return
+            for r in sp_results:
+                r['requested_query'] = 關鍵字
             # Spotify 文字搜尋永遠顯示 Top 5 讓使用者選
             await interaction.followup.send(
                 embed=make_embed(
@@ -1292,6 +1278,9 @@ class MainCog(commands.Cog):
         # 拉 25 個，過濾後保留 Top 15
         results = await self.music.search_youtube(query, max_results=25, scored=True)
         results = results[:15]
+        # ⭐ 帶上使用者原始輸入，供 fallback 同曲驗證用（避免「遇見」播成「遇到」）
+        for r in results:
+            r['requested_query'] = query
         print(f"[/歌姬啦] 搜尋結果（過濾後）數量：{len(results)}")
 
         if not results:
@@ -1315,7 +1304,7 @@ class MainCog(commands.Cog):
     # ════════════════════════════════════════════════════════
     #  /佇列（全欄位防呆）
     # ════════════════════════════════════════════════════════
-    @music_g.command(name="佇列", description="🎵 查看目前的音樂佇列")
+    @music_g.command(name="佇列", description="📜 查看目前的音樂佇列")
     async def queue_cmd(self, interaction: discord.Interaction):
         try:
             q = self.qm.get_or_create(interaction.guild_id)
@@ -1373,7 +1362,7 @@ class MainCog(commands.Cog):
     # ════════════════════════════════════════════════════════
     #  /現正播放（全欄位防呆）
     # ════════════════════════════════════════════════════════
-    @music_g.command(name="現正播放", description="🎵 查看目前播放中的歌曲")
+    @music_g.command(name="現正播放", description="🎶 查看目前播放中的歌曲")
     async def now_playing(self, interaction: discord.Interaction):
         try:
             q = self.qm.get_or_create(interaction.guild_id)
@@ -1419,7 +1408,7 @@ class MainCog(commands.Cog):
     # ════════════════════════════════════════════════════════
     #  /跳過（管理員 + 點歌者）
     # ════════════════════════════════════════════════════════
-    @music_g.command(name="跳過", description="跳過目前歌曲（管理員或點歌者可用）")
+    @music_g.command(name="跳過", description="⏭️ 跳過目前歌曲（管理員或點歌者可用）")
     async def skip(self, interaction: discord.Interaction):
         q = self.qm.get_or_create(interaction.guild_id)
         if not q.current or not q.vc or not q.vc.is_playing():
@@ -1498,7 +1487,7 @@ class MainCog(commands.Cog):
     # ════════════════════════════════════════════════════════
     #  /清空佇列（管理員限定）
     # ════════════════════════════════════════════════════════
-    @music_g.command(name="清空佇列", description="清空整個音樂佇列（管理員限定）")
+    @music_g.command(name="清空佇列", description="🗑️ 清空整個音樂佇列（管理員限定）")
     async def clear_queue(self, interaction: discord.Interaction):
         if not is_admin(interaction.user):
             await interaction.response.send_message(embed=make_embed(
@@ -1519,7 +1508,7 @@ class MainCog(commands.Cog):
     # ════════════════════════════════════════════════════════
     #  /停止
     # ════════════════════════════════════════════════════════
-    @music_g.command(name="停止", description="🎵 停止音樂並離開語音")
+    @music_g.command(name="停止", description="⏹️ 停止音樂並離開語音")
     async def stop(self, interaction: discord.Interaction):
         q = self.qm.get_or_create(interaction.guild_id)
         if q.vc and q.vc.is_connected():
@@ -2045,7 +2034,7 @@ class MainCog(commands.Cog):
             cwa_ok       = bool(Config.CWA_API_KEY)
             places_ok    = bool(Config.GOOGLE_PLACES_API_KEY)
             ai_enabled   = self.ai.is_available()
-            ai_backend   = Config.UTILITY_AI_BACKEND if ai_enabled else "—"
+            ai_backend   = (" → ".join(self.ai._provider_order()) if ai_enabled else "—")
             redis_status = "✅ 已連線" if (self.cache and getattr(self.cache, 'enabled', False)) else "⚠️ 未設定（記憶體模式）"
             db_backend = type(self.repo).__name__
 
@@ -2101,16 +2090,16 @@ class MainCog(commands.Cog):
         embed.add_field(
             name="🎵 /音樂",
             value=(
-                "`/音樂 歌姬啦` — 播放或加入佇列（純文字 → 15 個分 3 頁手動選歌）\n"
+                "🎵 `/音樂 歌姬啦` — 播放或加入佇列（純文字 → 15 個分 3 頁手動選歌）\n"
                 "　・搜尋類型：歌曲（預設）/ 歌手\n"
                 "　・來源：自動（預設）/ YouTube / Spotify\n"
-                "`/音樂 插播` — 把歌插到佇列最前面（不打斷正在播的）\n"
-                "`/音樂 佇列` — 查看目前音樂佇列\n"
-                "`/音樂 現正播放` — 查看目前播放中的歌曲\n"
-                "`/音樂 跳過` — 跳過目前歌曲（管理員或點歌者）\n"
-                "`/音樂 循環` — 設定循環模式（關閉/單曲/歌單）\n"
-                "`/音樂 停止` — 停止音樂並離開語音\n"
-                "`/音樂 清空佇列` — 清空整個音樂佇列（管理員限定）"
+                "🎵 `/音樂 插播` — 把歌插到佇列最前面（不打斷正在播的）\n"
+                "📜 `/音樂 佇列` — 查看目前音樂佇列\n"
+                "🎶 `/音樂 現正播放` — 查看目前播放中的歌曲\n"
+                "⏭️ `/音樂 跳過` — 跳過目前歌曲（管理員或點歌者）\n"
+                "🔁 `/音樂 循環` — 設定循環模式（關閉/單曲/歌單）\n"
+                "⏹️ `/音樂 停止` — 停止音樂並離開語音\n"
+                "🗑️ `/音樂 清空佇列` — 清空整個音樂佇列（管理員限定）"
             ),
             inline=False,
         )

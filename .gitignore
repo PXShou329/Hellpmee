@@ -3,6 +3,12 @@
 *.db
 *.sqlite
 
+# ── yt-dlp cookies（絕對不要進 git）──
+cookies.txt
+*cookies*.txt
+*youtube*cookies*.txt
+secrets/
+
 # ── Python ──────────────────────────
 __pycache__/
 *.py[cod]
@@ -23,6 +29,5 @@ env/
 logs/
 *.log
 
-
-# runtime data directory
-data/
+# ── Docker ──────────────────────────
+.dockerignore

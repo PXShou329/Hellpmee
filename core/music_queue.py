@@ -81,6 +81,12 @@ class QueuedSong:
     source_type:     str
     thumbnail:       str = ""
     display_source:  str = "YouTube"
+    # ⭐ 雲端音樂重構：保留「使用者真正想要的」與「實際播放的」（疑難雜症 7.3）
+    requested_query:     str  = ""    # 使用者原始輸入（歌名或 URL）
+    actual_played_title: str  = ""    # fallback 後實際播放的版本標題
+    actual_played_url:   str  = ""    # fallback 後實際播放的 URL
+    fallback_used:       bool = False
+    fallback_reason:     str  = ""
     created_at:      datetime = field(default_factory=datetime.now)
 
     def duration_str(self) -> str:
@@ -101,6 +107,7 @@ class QueuedSong:
             source_type=d.get('source_type') or 'youtube_search',
             thumbnail=d.get('thumbnail') or '',
             display_source=d.get('display_source') or 'YouTube',
+            requested_query=d.get('requested_query') or '',
         )
 
 

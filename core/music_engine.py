@@ -16,9 +16,12 @@
     <50 → 提示貼 URL
 """
 import asyncio
+import math
+import os
 import re
 import shutil
 import subprocess
+import unicodedata
 from typing import Optional
 
 import yt_dlp
@@ -36,35 +39,286 @@ from config import Config
 # ════════════════════════════════════════════════════════════════
 #  yt-dlp 設定
 # ════════════════════════════════════════════════════════════════
-_YOUTUBE_EXTRACTOR_ARGS = {
-    'youtube': {
-        # 多 client fallback：降低 YouTube 對單一 client 擋音源的機率
-        'player_client': ['android_vr', 'android', 'ios', 'web'],
+# ⭐ 雲端穩定化：YouTube player client 順序
+#    手動實測在 DigitalOcean 機房 IP 上，android_vr / web 較容易避開 bot check，
+#    android / ios 當後備（可能有 PO Token warning，但不一定致命）。
+_YOUTUBE_PLAYER_CLIENTS = ['android_vr', 'web', 'android', 'ios']
+
+
+def _base_ydl_opts() -> dict:
+    """所有 yt-dlp 呼叫共用的基底設定（每次動態建立，才能即時吃到 cookies 檔）。"""
+    opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'source_address': '0.0.0.0',
+        'retries': 3,
+        'fragment_retries': 3,
+        'nocheckcertificate': True,
+        # ⭐ 給 yt-dlp 指定 YouTube client 順序，提升雲端解析成功率
+        'extractor_args': {'youtube': {'player_client': _YOUTUBE_PLAYER_CLIENTS}},
     }
-}
+    # ⭐ 選填 cookies（不硬編碼、不進 git）：YTDLP_COOKIES_FILE 指到檔案才會用
+    cookies = getattr(Config, 'YTDLP_COOKIES_FILE', '') or ''
+    if cookies and os.path.exists(cookies):
+        opts['cookiefile'] = cookies
+    return opts
 
-_YDL_SEARCH_OPTS = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'no_warnings': False,
-    'extract_flat': True,
-    'noplaylist': True,
-    'source_address': '0.0.0.0',
-    'extractor_args': _YOUTUBE_EXTRACTOR_ARGS,
-}
 
-_YDL_STREAM_OPTS = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'no_warnings': False,
-    'noplaylist': True,
-    'source_address': '0.0.0.0',
-    'extractor_args': _YOUTUBE_EXTRACTOR_ARGS,
-}
+def _search_opts() -> dict:
+    return {
+        **_base_ydl_opts(),
+        'format': 'bestaudio/best',
+        'extract_flat': True,
+        'default_search': 'ytsearch',
+    }
+
+
+def _stream_opts() -> dict:
+    return {
+        **_base_ydl_opts(),
+        'format': 'bestaudio/best',
+        'noplaylist': True,
+    }
+
+
 _FFMPEG_OPTS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
+
+
+# ════════════════════════════════════════════════════════════════
+#  YouTube 錯誤分類（疑難雜症 7.8）
+# ════════════════════════════════════════════════════════════════
+def classify_ytdlp_error(error) -> str:
+    """把 yt-dlp 的例外訊息歸類，方便決定要不要 fallback、要怎麼提示使用者。"""
+    msg = str(error).lower()
+    if 'sign in to confirm' in msg or 'not a bot' in msg or 'confirm you' in msg:
+        return 'youtube_bot_check'
+    if 'age' in msg and 'restrict' in msg:
+        return 'age_restricted'
+    if 'private video' in msg:
+        return 'private_video'
+    if 'video unavailable' in msg or 'removed' in msg or 'terminated' in msg:
+        return 'video_unavailable'
+    if 'not available in your country' in msg or 'geo' in msg:
+        return 'geo_blocked'
+    if 'requested format is not available' in msg or 'no video formats' in msg:
+        return 'no_playable_format'
+    if 'unable to extract' in msg:
+        return 'extract_failed'
+    if 'http error 403' in msg or '403' in msg:
+        return 'http_403'
+    return 'unknown'
+
+
+# 這些分類代表「這個版本被擋」→ 值得嘗試同一首歌的其他版本
+_FALLBACK_WORTHY = {
+    'youtube_bot_check', 'age_restricted', 'private_video',
+    'video_unavailable', 'geo_blocked', 'no_playable_format',
+    'http_403', 'extract_failed',
+}
+
+
+# ════════════════════════════════════════════════════════════════
+#  同曲辨識（疑難雜症 7.4~7.7 / 指令文件 §6）
+#  原則：deterministic 規則為主，寧可不播也不要播錯。
+# ════════════════════════════════════════════════════════════════
+_CJK_RE     = re.compile(r'[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]')
+_CJK_RUN_RE = re.compile(r'[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]+')
+
+# 標題清理時要拿掉的雜訊詞（給 fallback 搜尋字串用，避免把髒標題帶進搜尋）
+_TITLE_NOISE = [
+    'official music video', 'official audio', 'official video', 'official mv',
+    'lyric video', 'lyrics', 'lyric', 'official', 'audio', 'mv', 'm/v',
+    'hd', 'hq', '4k', '高音質', '高画質', '高清', '完整版', '無損', '字幕',
+    'full version', 'full', 'visualizer', 'video',
+]
+# 版本差異關鍵字（候選有、但使用者沒要 → 視為不同版本）
+_VERSION_MARKERS = [
+    'cover', '翻唱', 'remix', 'nightcore', 'karaoke', '伴奏', 'instrumental',
+    'live', 'reaction', 'tutorial', 'piano', 'violin', 'mashup',
+    'sped up', 'slowed', 'acoustic', '8d', 'loop',
+]
+
+
+def _norm(s: str) -> str:
+    """正規化：NFKC（全形→半形）、小寫、去頭尾空白。"""
+    if not s:
+        return ''
+    return unicodedata.normalize('NFKC', s).lower().strip()
+
+
+def _cjk_chars(s: str) -> set:
+    return set(''.join(_CJK_RUN_RE.findall(_norm(s))))
+
+
+def is_cjk_short_query(q: str) -> bool:
+    """
+    判斷使用者輸入是不是「短中/日/韓文歌名」（沒空格、CJK 為主、≤6 字）。
+    例：遇見 / 淒美地 / アイドル → True
+        孫燕姿 遇見 / never gonna give you up → False
+    """
+    qn = _norm(q).replace(' ', '')
+    if not qn or not _CJK_RE.search(qn):
+        return False
+    if ' ' in _norm(q).strip():
+        return False
+    return len(qn) <= 6
+
+
+def clean_song_title(title: str) -> str:
+    """把 YouTube 標題清成乾淨的『歌名核心』，給 fallback 搜尋用（疑難雜症 7.7）。"""
+    t = title or ''
+    # 1) 圓括號 / 方括號 / 【】〔〕 內通常是雜訊（Official Video 之類）→ 連內容一起拿掉
+    t = re.sub(r'[\(\（\[\［【〔].*?[\)\）\]\］】〕]', ' ', t)
+    # 2) 書名號 / 引號（「」『』 等）只去符號、保留內容
+    #    —— 日文歌名常放在「」內，內容不能刪
+    for ch in '「」『』“”"＂\'':
+        t = t.replace(ch, ' ')
+    # 拿掉 10小時 / 1 hour 之類
+    t = re.sub(r'\d+\s*(小時|hours?|分鐘|min)', ' ', t, flags=re.I)
+    low = t.lower()
+    for w in _TITLE_NOISE:
+        low = low.replace(w, ' ')
+    # 用清理後的小寫位置砍回原字串長度（簡化：直接對原字串做不分大小寫替換）
+    for w in _TITLE_NOISE:
+        t = re.sub(re.escape(w), ' ', t, flags=re.I)
+    t = re.sub(r'[\|/]+', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip(' -–—_')
+    return t.strip()
+
+
+def build_fallback_queries(requested_query: str, title: str,
+                            uploader: str) -> list[str]:
+    """
+    產生 fallback 搜尋字串。優先用使用者原始 query（最乾淨），
+    再用清理後的歌名 + 歌手，最後才用原始 query 補強。
+    """
+    queries: list[str] = []
+
+    def _add(q: str):
+        q = (q or '').strip()
+        if q and q.lower() not in [x.lower() for x in queries]:
+            queries.append(q)
+
+    rq = (requested_query or '').strip()
+    # requested_query 是 URL 就不拿來當搜尋字
+    if rq and not rq.lower().startswith('http'):
+        _add(f"{rq} official audio")
+        _add(f"{rq} audio")
+        _add(rq)
+
+    core = clean_song_title(title)
+    artist = (uploader or '').strip()
+    # 把 "- Topic" / "VEVO" 這種非歌手雜訊拿掉
+    artist_clean = re.sub(r'(?i)\s*-\s*topic|vevo|official', '', artist).strip()
+    if core:
+        if artist_clean and artist_clean.lower() not in core.lower():
+            _add(f"{artist_clean} {core} official audio")
+            _add(f"{artist_clean} {core}")
+        _add(f"{core} official audio")
+        _add(f"{core} audio")
+        _add(f"{core} lyrics")
+
+    return queries[:6]
+
+
+def score_same_song(requested_query: str,
+                     ref_title: str,
+                     candidate_title: str,
+                     candidate_uploader: str = '',
+                     duration=None) -> tuple[int, list[str]]:
+    """
+    判斷『候選』跟『使用者真正想要的那首歌』是不是同一首。
+    回傳 (score, reasons)。分數越高越像同一首。
+
+    deterministic 為主：
+      - 短 CJK query（如「遇見」）：候選標題沒完整包含就重扣（避免播成「遇到」）
+      - 命中歌名 / 歌手 → 加分
+      - cover / remix / live 等版本標記（使用者沒要）→ 扣分
+    """
+    reasons: list[str] = []
+    score = 0
+
+    rq        = _norm(requested_query)
+    cand      = _norm(candidate_title)
+    ref       = _norm(ref_title)
+    uploader  = _norm(candidate_uploader)
+
+    # ── 短 CJK query：硬規則（疑難雜症 7.6）──
+    if is_cjk_short_query(requested_query):
+        if rq and rq in cand:
+            score += 50
+            reasons.append(f"短CJK歌名「{requested_query}」完整命中 +50")
+        else:
+            score -= 80
+            reasons.append(f"短CJK歌名「{requested_query}」未完整出現 -80")
+    else:
+        # ── 一般 query：整串命中 / 個別詞命中 ──
+        if rq and rq in cand:
+            score += 40
+            reasons.append("query 整串命中 +40")
+        else:
+            words = [w for w in rq.split() if len(w) > 1]
+            if words:
+                hit = sum(1 for w in words if w in cand)
+                ratio = hit / len(words)
+                add = int(ratio * 35)
+                score += add
+                reasons.append(f"query 詞命中 {hit}/{len(words)} +{add}")
+                if ratio < 0.5:
+                    score -= 30
+                    reasons.append("命中比例過低 -30")
+
+    # ── 跟原始（已選定）標題的 CJK 字重疊（fallback 時 ref_title 有值）──
+    ref_cjk = _cjk_chars(ref)
+    if ref_cjk:
+        cand_cjk = _cjk_chars(cand)
+        if cand_cjk:
+            coverage = len(ref_cjk & cand_cjk) / len(ref_cjk)
+            if coverage >= 0.99:
+                score += 25
+                reasons.append("原標題CJK完全涵蓋 +25")
+            elif coverage >= 0.7:
+                score += 10
+                reasons.append(f"原標題CJK涵蓋 {coverage:.0%} +10")
+            else:
+                score -= 40
+                reasons.append(f"原標題CJK涵蓋僅 {coverage:.0%} -40")
+
+    # ── 歌手命中 ──
+    artist_tokens = [t for t in re.split(r'[\s\-,，、]+', ref) if len(t) > 1]
+    if artist_tokens and any(t in uploader or t in cand for t in artist_tokens[:1]):
+        score += 15
+        reasons.append("疑似歌手命中 +15")
+
+    # ── 官方頻道 ──
+    if any(h in uploader for h in ('vevo', 'topic', 'official', 'records')):
+        score += 15
+        reasons.append("官方頻道 +15")
+
+    # ── 版本標記（使用者沒要 cover/remix/live...）──
+    for marker in _VERSION_MARKERS:
+        if marker in cand and marker not in rq:
+            score -= 40
+            reasons.append(f"含版本標記「{marker}」(使用者未要求) -40")
+            break
+
+    # ── 長度合理性 ──
+    if duration is not None:
+        try:
+            d = int(float(duration))
+            if 90 <= d <= 600:
+                score += 10
+                reasons.append("長度合理 +10")
+            elif d > 900 and 'live' not in rq:
+                score -= 30
+                reasons.append("長度過長(>15min) -30")
+        except (TypeError, ValueError):
+            pass
+
+    return score, reasons
 
 
 # ════════════════════════════════════════════════════════════════
@@ -270,7 +524,7 @@ class MusicEngine:
         回傳 dict 或 None。
         """
         def _do():
-            with yt_dlp.YoutubeDL(_YDL_STREAM_OPTS) as ydl:
+            with yt_dlp.YoutubeDL(_stream_opts()) as ydl:
                 info = ydl.extract_info(url, download=False)
                 if 'entries' in info and info['entries']:
                     info = info['entries'][0]
@@ -379,7 +633,7 @@ class MusicEngine:
         search_query = f'ytsearch{max_results}:{query}'
 
         def _do():
-            with yt_dlp.YoutubeDL(_YDL_SEARCH_OPTS) as ydl:
+            with yt_dlp.YoutubeDL(_search_opts()) as ydl:
                 info = ydl.extract_info(search_query, download=False)
                 return info.get('entries', []) if 'entries' in info else [info]
 
@@ -493,7 +747,6 @@ class MusicEngine:
                 score += pts
 
         # ── 觀看數做 tiebreaker（log scale，最多 +20）──
-        import math
         if views > 0:
             log_views = math.log10(views)         # 1萬→4 / 100萬→6 / 1億→8
             score += min(int(log_views * 2.5), 20)
@@ -512,31 +765,6 @@ class MusicEngine:
         query = f"{artist} popular songs"
         all_results = await self.search_youtube(query, max_results=25, scored=True)
         return all_results[:max_results]
-
-    # ════════════════════════════════════════════════════════
-    #  ⭐ 播放前驗證（規格 4）
-    # ════════════════════════════════════════════════════════
-    async def verify_playable(self, song_dict: dict) -> tuple[bool, str]:
-        """
-        在加入佇列之前先驗證能不能播。
-        回傳：(playable, reason)
-            playable=False 時 reason 是不能播的原因
-        """
-        title = song_dict.get('title') or '?'
-        url   = song_dict.get('webpage_url') or song_dict.get('url') or ''
-
-        if not url:
-            return (False, "結果沒有可播放網址")
-        if not url.startswith('http'):
-            return (False, "URL 格式不正確")
-
-        # 嘗試取得實際 stream URL（不要實際 stream，只解析）
-        stream_url = await self.get_stream_url(url)
-        if not stream_url:
-            return (False, "無法取得音源串流")
-
-        return (True, "OK")
-
 
     # ════════════════════════════════════════════════════════
     #  Spotify 文字搜尋（依規格六：來源 = Spotify 時用）
@@ -589,31 +817,42 @@ class MusicEngine:
         return results
 
     # ════════════════════════════════════════════════════════
-    #  取得實際串流 URL
+    #  取得實際串流 URL（含錯誤分類）
     # ════════════════════════════════════════════════════════
-    async def get_stream_url(self, youtube_url: str) -> Optional[str]:
+    async def _extract_stream(self, youtube_url: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        回傳 (stream_url, error_category)。
+        成功：(url, None)；失敗：(None, 分類字串)
+        """
         def _do():
-            with yt_dlp.YoutubeDL(_YDL_STREAM_OPTS) as ydl:
+            with yt_dlp.YoutubeDL(_stream_opts()) as ydl:
                 info = ydl.extract_info(youtube_url, download=False)
-                if 'entries' in info:
+                if info and 'entries' in info and info['entries']:
                     info = info['entries'][0]
-                return info.get('url')
+                return (info or {}).get('url')
         try:
-            return await asyncio.get_event_loop().run_in_executor(None, _do)
+            url = await asyncio.get_event_loop().run_in_executor(None, _do)
+            if url:
+                return url, None
+            return None, 'no_playable_format'
         except Exception as e:
-            print(f"[Music] 取得串流失敗（{youtube_url}）：{e}")
-            import traceback
-            traceback.print_exc()
-            return None
+            cat = classify_ytdlp_error(e)
+            print(f"[Music] 取得串流失敗（{youtube_url}）分類={cat}：{str(e)[:160]}")
+            return None, cat
+
+    async def get_stream_url(self, youtube_url: str) -> Optional[str]:
+        """相容舊呼叫：只回 stream_url（失敗回 None）。"""
+        url, _ = await self._extract_stream(youtube_url)
+        return url
 
     async def verify_playable(self, item: dict) -> tuple[bool, str]:
         """
-        ⭐ 規格 4：播放前驗證
-        檢查 selected_result 真的能播：
-            1. 有可解析的 webpage_url
-            2. yt-dlp 能拿到 stream URL（最強的驗證）
+        ⭐ 選歌階段「輕量驗證」（疑難雜症 5.3 / 問題 A）：
+        只檢查結構（有合法 URL、是單一影片），
+        **不**在這裡預抓 stream URL —— 預抓會在雲端提早觸發 YouTube bot check，
+        導致還沒播就被判失敗。實際能不能播放，留到 resolve_playable_stream。
 
-        回傳 (ok, reason)。失敗時 reason 是給使用者看的訊息。
+        回傳 (ok, reason)。
         """
         webpage_url = item.get('webpage_url') or item.get('url') or ''
         if not webpage_url or not webpage_url.startswith('http'):
@@ -626,11 +865,122 @@ class MusicEngine:
         }):
             return False, "這個結果是頻道或播放清單，不是單一影片"
 
-        # 搜尋選歌階段不要預抓串流 URL。
-        # 原本這裡會先呼叫 yt-dlp 驗證一次，但 YouTube 對 VPS / 機房 IP 常出現 bot check，
-        # 會導致「其實正式播放可能成功，但預驗證先失敗」。
-        # 因此這裡只做基本 URL / 單一影片檢查，真正串流交給播放階段處理。
         return True, ""
+
+    # ════════════════════════════════════════════════════════
+    #  ⭐ 解析可播放串流（雲端核心：原版 → 同曲 fallback）
+    # ════════════════════════════════════════════════════════
+    async def resolve_playable_stream(self, song) -> dict:
+        """
+        把一首歌（QueuedSong 或 dict）解析成「真的能播的 stream URL」。
+
+        流程（疑難雜症 §8）：
+          1. 先試原始 URL
+          2. 原始被擋（bot check / 不可用 / 無格式）→ 用『同一首歌』的
+             其他版本當 fallback，但每個候選都要通過 same-song 檢查，
+             寧可不播也不要播成別首歌
+          3. 全部失敗 → 回傳清楚的 reason
+
+        回傳 dict：
+          {
+            ok, stream_url,
+            actual_title, actual_url, actual_uploader,
+            fallback_used, fallback_reason,
+            failure_category, failure_message,
+            attempts,           # list[dict]
+          }
+        """
+        def _g(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        title           = _g(song, 'title') or ''
+        webpage_url      = _g(song, 'webpage_url') or _g(song, 'url') or ''
+        uploader        = _g(song, 'uploader') or ''
+        requested_query = _g(song, 'requested_query') or ''
+        duration        = _g(song, 'duration')
+
+        result = {
+            'ok': False, 'stream_url': None,
+            'actual_title': title, 'actual_url': webpage_url,
+            'actual_uploader': uploader,
+            'fallback_used': False, 'fallback_reason': None,
+            'failure_category': None, 'failure_message': None,
+            'attempts': [],
+        }
+
+        # ── Step 1：原始 URL ──
+        if webpage_url:
+            stream_url, cat = await self._extract_stream(webpage_url)
+            result['attempts'].append(
+                {'stage': 'original', 'url': webpage_url, 'category': cat})
+            if stream_url:
+                result.update(ok=True, stream_url=stream_url)
+                return result
+            result['failure_category'] = cat
+            # 不值得 fallback 的錯誤（例如未知）就不再亂找
+            if cat not in _FALLBACK_WORTHY:
+                result['failure_message'] = "這個版本無法取得音源"
+                return result
+
+        # ── Step 2：同曲 fallback ──
+        queries = build_fallback_queries(requested_query, title, uploader)
+        # 比對基準：使用者打字的歌名最準；若來源是 URL/空白，改用清乾淨的歌名
+        if requested_query and not requested_query.lower().startswith('http'):
+            match_query = requested_query
+        else:
+            match_query = clean_song_title(title)
+        print(f"[Music] resolve fallback queries={queries} match_query={match_query!r}")
+
+        seen_urls = {webpage_url}
+        for q in queries:
+            candidates = await self.search_youtube(q, max_results=5, scored=False)
+            # 依 same-song 分數排序
+            scored = []
+            for c in candidates:
+                c_url = c.get('webpage_url') or c.get('url') or ''
+                if not c_url or c_url in seen_urls:
+                    continue
+                sc, reasons = score_same_song(
+                    match_query, title,
+                    c.get('title') or '', c.get('uploader') or '',
+                    c.get('duration'),
+                )
+                scored.append((sc, c, reasons))
+            scored.sort(key=lambda x: -x[0])
+
+            for sc, c, reasons in scored:
+                c_url = c.get('webpage_url') or c.get('url') or ''
+                # 門檻：同曲分數 < 70 一律不採用（疑難雜症 7.5）
+                if sc < 70:
+                    result['attempts'].append(
+                        {'stage': 'fallback_reject', 'url': c_url,
+                         'score': sc, 'reasons': reasons})
+                    continue
+                seen_urls.add(c_url)
+                stream_url, cat = await self._extract_stream(c_url)
+                result['attempts'].append(
+                    {'stage': 'fallback_try', 'url': c_url,
+                     'score': sc, 'category': cat})
+                if stream_url:
+                    result.update(
+                        ok=True, stream_url=stream_url,
+                        actual_title=c.get('title') or title,
+                        actual_url=c_url,
+                        actual_uploader=c.get('uploader') or '',
+                        fallback_used=True,
+                        fallback_reason=result['failure_category'] or 'original_failed',
+                    )
+                    return result
+
+        # ── 全部失敗 ──
+        if not result['failure_category']:
+            result['failure_category'] = 'no_candidate'
+        result['failure_message'] = (
+            "找不到夠吻合且可播放的版本"
+        )
+        return result
 
     # ════════════════════════════════════════════════════════
     #  Discord 音訊來源
