@@ -31,3 +31,4 @@ logs/
 
 # ── Docker ──────────────────────────
 .dockerignore
+.env.backup*
